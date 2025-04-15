@@ -1,0 +1,213 @@
+-- 1. Включение необходимых компонентов SQL Server
+USE master;
+GO
+
+-- Включение advanced options
+IF EXISTS (SELECT 1 FROM sys.configurations WHERE name = 'show advanced options' AND value_in_use = 0)
+BEGIN
+    EXEC sp_configure 'show advanced options', 1;
+    RECONFIGURE;
+END
+GO
+
+-- Включение Database Mail XPs
+IF EXISTS (SELECT 1 FROM sys.configurations WHERE name = 'Database Mail XPs' AND value_in_use = 0)
+BEGIN
+    EXEC sp_configure 'Database Mail XPs', 1;
+    RECONFIGURE;
+END
+GO
+
+-- 2. Настройка Database Mail
+USE msdb;
+GO
+
+-- Удаление существующей конфигурации (если есть)
+IF EXISTS (SELECT 1 FROM msdb.dbo.sysmail_profile WHERE name = 'SQLServerMailProfile')
+BEGIN
+    -- Удаление связей профиля с аккаунтами
+    EXEC msdb.dbo.sysmail_delete_profileaccount_sp @profile_name = 'SQLServerMailProfile';
+    
+    -- Удаление профиля
+    EXEC msdb.dbo.sysmail_delete_profile_sp @profile_name = 'SQLServerMailProfile';
+END
+
+IF EXISTS (SELECT 1 FROM msdb.dbo.sysmail_account WHERE name = 'SQLServerMailAccount')
+BEGIN
+    -- Удаление аккаунта
+    EXEC msdb.dbo.sysmail_delete_account_sp @account_name = 'SQLServerMailAccount';
+END
+GO
+
+-- Создание нового почтового аккаунта
+EXEC msdb.dbo.sysmail_add_account_sp
+    @account_name = 'SQLServerMailAccount',
+    @description = 'Основной почтовый аккаунт SQL Server',
+    @email_address = 'sqlserver@yourdomain.com', -- Замените на реальный email
+    @display_name = 'SQL Server Notification',
+    @mailserver_name = 'smtp.yourdomain.com', -- Замените на ваш SMTP сервер
+    @port = 587,
+    @username = 'sqlserver@yourdomain.com', -- Замените на логин
+    @password = 'your_password', -- Замените на пароль
+    @enable_ssl = 1;
+GO
+
+-- Создание почтового профиля
+EXEC msdb.dbo.sysmail_add_profile_sp
+    @profile_name = 'SQLServerMailProfile',
+    @description = 'Основной почтовый профиль SQL Server';
+GO
+
+-- Связывание профиля с аккаунтом
+EXEC msdb.dbo.sysmail_add_profileaccount_sp
+    @profile_name = 'SQLServerMailProfile',
+    @account_name = 'SQLServerMailAccount',
+    @sequence_number = 1;
+GO
+
+-- Назначение профиля по умолчанию
+EXEC msdb.dbo.sysmail_add_principalprofile_sp
+    @profile_name = 'SQLServerMailProfile',
+    @principal_name = 'public',
+    @is_default = 1;
+GO
+
+-- 3. Проверка работы Database Mail
+EXEC msdb.dbo.sp_send_dbmail
+    @profile_name = 'SQLServerMailProfile',
+    @recipients = 'your.email@yourdomain.com', -- Замените на ваш email
+    @subject = 'Тест Database Mail',
+    @body = 'Это тестовое сообщение от SQL Server Database Mail. Если вы получили это письмо, значит настройка выполнена успешно.';
+GO
+
+-- 4. Настройка оператора
+IF EXISTS (SELECT 1 FROM msdb.dbo.sysoperators WHERE name = 'DBA_Operator')
+BEGIN
+    EXEC msdb.dbo.sp_delete_operator @name = 'DBA_Operator';
+END
+GO
+
+EXEC msdb.dbo.sp_add_operator
+    @name = 'DBA_Operator',
+    @enabled = 1,
+    @email_address = 'dba@yourdomain.com', -- Замените на email администратора
+    @pager_days = 127, -- Все дни недели
+    @weekday_pager_start_time = 000000,
+    @weekday_pager_end_time = 235959,
+    @pager_address = 'dba@yourdomain.com'; -- Замените на email администратора
+GO
+
+-- 5. Создание плана обслуживания
+USE msdb;
+GO
+
+-- Удаление существующего плана (если есть)
+IF EXISTS (SELECT 1 FROM msdb.dbo.sysmaintplan_plans WHERE name = 'WeeklyMaintenancePlan')
+BEGIN
+    DECLARE @plan_id UNIQUEIDENTIFIER;
+    SELECT @plan_id = id FROM msdb.dbo.sysmaintplan_plans WHERE name = 'WeeklyMaintenancePlan';
+    
+    EXEC msdb.dbo.sp_delete_maintenance_plan @plan_id = @plan_id;
+END
+GO
+
+-- Создание нового плана обслуживания
+DECLARE @plan_id UNIQUEIDENTIFIER;
+EXEC msdb.dbo.sp_add_maintenance_plan 
+    @plan_name = 'WeeklyMaintenancePlan', 
+    @plan_id = @plan_id OUTPUT;
+GO
+
+-- Добавление подплана для резервного копирования
+DECLARE @plan_id UNIQUEIDENTIFIER;
+DECLARE @subplan_id INT;
+
+SELECT @plan_id = id FROM msdb.dbo.sysmaintplan_plans WHERE name = 'WeeklyMaintenancePlan';
+
+EXEC msdb.dbo.sp_add_maintenance_plan_subplan 
+    @plan_id = @plan_id, 
+    @subplan_name = 'FullBackupSubplan', 
+    @subplan_id = @subplan_id OUTPUT;
+GO
+
+-- Добавление задачи резервного копирования
+DECLARE @plan_id UNIQUEIDENTIFIER;
+DECLARE @subplan_id INT;
+
+SELECT @plan_id = id FROM msdb.dbo.sysmaintplan_plans WHERE name = 'WeeklyMaintenancePlan';
+SELECT @subplan_id = subplan_id FROM msdb.dbo.sysmaintplan_subplans WHERE plan_id = @plan_id AND subplan_name = 'FullBackupSubplan';
+
+EXEC msdb.dbo.sp_add_maintenance_plan_task
+    @plan_id = @plan_id,
+    @subplan_id = @subplan_id,
+    @task_type = 'BACKUP_DATABASE_TASK',
+    @task_name = 'FullDatabaseBackup',
+    @database_selection = 'ALL_DATABASES',
+    @backup_type = 'FULL',
+    @backup_location = 'DISK',
+    @backup_file = 'C:\SQLBackups\{DBNAME}_Full_{DATE}.bak', -- Укажите правильный путь
+    @compress_backup = 'TRUE',
+    @verify_integrity = 'TRUE',
+    @cleanup_time = 168; -- Хранение 7 дней (168 часов)
+GO
+
+-- Настройка расписания
+DECLARE @job_id UNIQUEIDENTIFIER;
+SELECT @job_id = job_id FROM msdb.dbo.sysmaintplan_subplans 
+WHERE plan_id = (SELECT id FROM msdb.dbo.sysmaintplan_plans WHERE name = 'WeeklyMaintenancePlan')
+AND subplan_name = 'FullBackupSubplan';
+
+EXEC msdb.dbo.sp_update_schedule
+    @job_id = @job_id,
+    @name = 'WeeklyMaintenanceSchedule',
+    @enabled = 1,
+    @freq_type = 8, -- Еженедельно
+    @freq_interval = 1, -- Воскресенье
+    @freq_subday_type = 1, -- Один раз в день
+    @freq_subday_interval = 0,
+    @freq_relative_interval = 0,
+    @freq_recurrence_factor = 1,
+    @active_start_date = NULL, -- Текущая дата
+    @active_end_date = 99991231, -- 31.12.9999
+    @active_start_time = 220000, -- 22:00
+    @active_end_time = 235959;
+GO
+
+-- 6. Настройка уведомлений
+DECLARE @job_id UNIQUEIDENTIFIER;
+SELECT @job_id = job_id FROM msdb.dbo.sysmaintplan_subplans 
+WHERE plan_id = (SELECT id FROM msdb.dbo.sysmaintplan_plans WHERE name = 'WeeklyMaintenancePlan')
+AND subplan_name = 'FullBackupSubplan';
+
+EXEC msdb.dbo.sp_update_job
+    @job_id = @job_id,
+    @notify_level_email = 2, -- Уведомлять при ошибке
+    @notify_email_operator_name = 'DBA_Operator';
+GO
+
+-- 7. Проверка конфигурации
+-- Проверка Database Mail
+SELECT * FROM msdb.dbo.sysmail_account;
+SELECT * FROM msdb.dbo.sysmail_profile;
+SELECT * FROM msdb.dbo.sysmail_profileaccount;
+
+-- Проверка оператора
+SELECT * FROM msdb.dbo.sysoperators WHERE name = 'DBA_Operator';
+
+-- Проверка плана обслуживания
+SELECT * FROM msdb.dbo.sysmaintplan_plans;
+SELECT * FROM msdb.dbo.sysmaintplan_subplans;
+SELECT * FROM msdb.dbo.sysmaintplan_tasks;
+GO
+
+-- 8. Запуск тестового выполнения
+DECLARE @execution_id BIGINT;
+EXEC msdb.dbo.sp_start_maintenance_plan_execution 
+    @plan_id = (SELECT id FROM msdb.dbo.sysmaintplan_plans WHERE name = 'WeeklyMaintenancePlan'),
+    @execution_id = @execution_id OUTPUT;
+
+-- Проверка статуса выполнения
+SELECT * FROM msdb.dbo.sysmaintplan_log WHERE plan_id = 
+    (SELECT id FROM msdb.dbo.sysmaintplan_plans WHERE name = 'WeeklyMaintenancePlan')
+ORDER BY start_time DESC;
+GOФ
