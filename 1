@@ -1,0 +1,118 @@
+-- =============================================
+-- ШАГ 1: Создание аудита сервера
+-- =============================================
+USE master;
+GO
+
+-- Проверяем, существует ли аудит, и удаляем если существует
+IF EXISTS (SELECT 1 FROM sys.server_audits WHERE name = 'ServerAudit')
+BEGIN
+    ALTER SERVER AUDIT ServerAudit WITH (STATE = OFF);
+    DROP SERVER AUDIT ServerAudit;
+END
+GO
+
+-- Создаем аудит сервера
+CREATE SERVER AUDIT ServerAudit
+TO FILE (
+    FILEPATH = 'C:\SQLAudit\', -- Убедитесь, что папка существует и SQL Server имеет права на запись
+    MAXSIZE = 256 MB,
+    MAX_ROLLOVER_FILES = 10,
+    RESERVE_DISK_SPACE = OFF
+)
+WITH (
+    QUEUE_DELAY = 1000,
+    ON_FAILURE = CONTINUE
+);
+GO
+
+-- Включаем аудит
+ALTER SERVER AUDIT ServerAudit
+WITH (STATE = ON);
+GO
+
+-- =============================================
+-- ШАГ 2: Создание спецификации аудита сервера
+-- =============================================
+USE master;
+GO
+
+-- Проверяем и удаляем существующую спецификацию
+IF EXISTS (SELECT 1 FROM sys.server_audit_specifications WHERE name = 'ServerAuditSpec')
+BEGIN
+    ALTER SERVER AUDIT SPECIFICATION ServerAuditSpec WITH (STATE = OFF);
+    DROP SERVER AUDIT SPECIFICATION ServerAuditSpec;
+END
+GO
+
+-- Создаем спецификацию аудита сервера
+CREATE SERVER AUDIT SPECIFICATION ServerAuditSpec
+FOR SERVER AUDIT ServerAudit
+ADD (FAILED_LOGIN_GROUP),               -- Неудачные попытки авторизации
+ADD (BACKUP_RESTORE_GROUP),            -- Создание резервных копий
+ADD (LOGIN_CHANGE_PASSWORD_GROUP);     -- Изменение пароля входа
+GO
+
+-- Включаем спецификацию
+ALTER SERVER AUDIT SPECIFICATION ServerAuditSpec
+WITH (STATE = ON);
+GO
+
+-- =============================================
+-- ШАГ 3: Создание спецификации аудита базы данных
+-- =============================================
+USE Chernyshev;
+GO
+
+-- Проверяем и удаляем существующую спецификацию
+IF EXISTS (SELECT 1 FROM sys.database_audit_specifications WHERE name = 'DatabaseAuditSpec')
+BEGIN
+    ALTER DATABASE AUDIT SPECIFICATION DatabaseAuditSpec WITH (STATE = OFF);
+    DROP DATABASE AUDIT SPECIFICATION DatabaseAuditSpec;
+END
+GO
+
+-- Создаем спецификацию аудита базы данных для таблицы Customers
+-- Замените 'dbo.Customers' на вашу таблицу
+CREATE DATABASE AUDIT SPECIFICATION DatabaseAuditSpec
+FOR SERVER AUDIT ServerAudit
+ADD (SELECT, INSERT, UPDATE, DELETE ON dbo.Customers BY public);
+GO
+
+-- Включаем спецификацию
+ALTER DATABASE AUDIT SPECIFICATION DatabaseAuditSpec
+WITH (STATE = ON);
+GO
+
+-- =============================================
+-- ШАГ 4: Проверка настроек аудита
+-- =============================================
+-- Проверяем созданный аудит сервера
+SELECT * FROM sys.server_audits;
+GO
+
+-- Проверяем спецификацию аудита сервера
+SELECT * FROM sys.server_audit_specifications;
+SELECT * FROM sys.server_audit_specification_details;
+GO
+
+-- Проверяем спецификацию аудита базы данных
+SELECT * FROM sys.database_audit_specifications;
+SELECT * FROM sys.database_audit_specification_details;
+GO
+
+-- =============================================
+-- ШАГ 5: Просмотр данных аудита (после выполнения аудируемых действий)
+-- =============================================
+-- Просмотр данных аудита
+SELECT 
+    event_time,
+    action_id,
+    succeeded,
+    server_principal_name,
+    database_name,
+    object_name,
+    statement
+FROM sys.fn_get_audit_file('C:\SQLAudit\*', NULL, NULL)
+ORDER BY event_time DESC;
+GO
