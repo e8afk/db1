@@ -1,0 +1,509 @@
+-- 1. Создание базы данных (если еще не создана)
+USE master;
+GO
+
+IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = 'CarRentalDB')
+BEGIN
+    CREATE DATABASE CarRentalDB;
+    PRINT 'База данных CarRentalDB создана';
+END
+ELSE
+    PRINT 'База данных CarRentalDB уже существует';
+GO
+
+USE CarRentalDB;
+GO
+
+-- 2. Создание таблиц (если еще не созданы)
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Clients')
+BEGIN
+    CREATE TABLE Clients (
+        ClientID INT PRIMARY KEY IDENTITY(1,1),
+        FirstName NVARCHAR(50) NOT NULL,
+        LastName NVARCHAR(50) NOT NULL,
+        LicenseNumber NVARCHAR(20) UNIQUE NOT NULL,
+        Phone NVARCHAR(20) NOT NULL,
+        Email NVARCHAR(100),
+        RegistrationDate DATETIME DEFAULT GETDATE()
+    );
+    PRINT 'Таблица Clients создана';
+END
+
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Cars')
+BEGIN
+    CREATE TABLE Cars (
+        CarID INT PRIMARY KEY IDENTITY(1,1),
+        Make NVARCHAR(50) NOT NULL,
+        Model NVARCHAR(50) NOT NULL,
+        Year INT NOT NULL,
+        LicensePlate NVARCHAR(15) UNIQUE NOT NULL,
+        DailyRate DECIMAL(10,2) NOT NULL,
+        Status NVARCHAR(20) DEFAULT 'Available',
+        LastMaintenanceDate DATETIME
+    );
+    PRINT 'Таблица Cars создана';
+END
+
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Rentals')
+BEGIN
+    CREATE TABLE Rentals (
+        RentalID INT PRIMARY KEY IDENTITY(1,1),
+        ClientID INT NOT NULL FOREIGN KEY REFERENCES Clients(ClientID),
+        CarID INT NOT NULL FOREIGN KEY REFERENCES Cars(CarID),
+        StartDate DATETIME NOT NULL,
+        EndDate DATETIME NOT NULL,
+        TotalCost DECIMAL(10,2) NOT NULL,
+        Status NVARCHAR(20) DEFAULT 'Active',
+        EmployeeID INT
+    );
+    PRINT 'Таблица Rentals создана';
+END
+
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Employees')
+BEGIN
+    CREATE TABLE Employees (
+        EmployeeID INT PRIMARY KEY IDENTITY(1,1),
+        FirstName NVARCHAR(50) NOT NULL,
+        LastName NVARCHAR(50) NOT NULL,
+        Position NVARCHAR(50) NOT NULL,
+        HireDate DATETIME DEFAULT GETDATE(),
+        Email NVARCHAR(100) UNIQUE NOT NULL,
+        Phone NVARCHAR(20) NOT NULL
+    );
+    PRINT 'Таблица Employees создана';
+END
+
+-- Добавляем внешний ключ в Rentals после создания таблицы Employees
+IF NOT EXISTS (
+    SELECT * FROM sys.foreign_keys 
+    WHERE name = 'FK_Rentals_Employees'
+)
+BEGIN
+    ALTER TABLE Rentals
+    ADD CONSTRAINT FK_Rentals_Employees
+    FOREIGN KEY (EmployeeID) REFERENCES Employees(EmployeeID);
+    PRINT 'Внешний ключ FK_Rentals_Employees добавлен';
+END
+GO
+
+-- 3. Создание ролей базы данных
+USE CarRentalDB;
+GO
+
+-- Роль администратора (полный доступ)
+IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'AdminRole' AND type = 'R')
+BEGIN
+    CREATE ROLE AdminRole;
+    PRINT 'Роль AdminRole создана';
+    
+    -- Предоставление прав администратора
+    GRANT CONTROL ON DATABASE::CarRentalDB TO AdminRole;
+    PRINT 'Права администратора предоставлены';
+END
+
+-- Роль менеджера (управление арендами, клиентами, автомобилями)
+IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'ManagerRole' AND type = 'R')
+BEGIN
+    CREATE ROLE ManagerRole;
+    PRINT 'Роль ManagerRole создана';
+    
+    -- Предоставление прав менеджера
+    GRANT SELECT, INSERT, UPDATE ON Clients TO ManagerRole;
+    GRANT SELECT, INSERT, UPDATE ON Cars TO ManagerRole;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON Rentals TO ManagerRole;
+    GRANT SELECT ON Employees TO ManagerRole;
+    PRINT 'Права менеджера предоставлены';
+END
+
+-- Роль сотрудника (работа с арендами)
+IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'EmployeeRole' AND type = 'R')
+BEGIN
+    CREATE ROLE EmployeeRole;
+    PRINT 'Роль EmployeeRole создана';
+    
+    -- Предоставление прав сотрудника
+    GRANT SELECT, INSERT, UPDATE ON Clients TO EmployeeRole;
+    GRANT SELECT ON Cars TO EmployeeRole;
+    GRANT SELECT, INSERT, UPDATE ON Rentals TO EmployeeRole;
+    PRINT 'Права сотрудника предоставлены';
+END
+
+-- Роль клиента (только просмотр доступных автомобилей и своих аренд)
+IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'CustomerRole' AND type = 'R')
+BEGIN
+    CREATE ROLE CustomerRole;
+    PRINT 'Роль CustomerRole создана';
+    
+    -- Предоставление прав клиента
+    GRANT SELECT ON Cars TO CustomerRole WHERE Status = 'Available';
+    PRINT 'Ограниченные права клиента предоставлены';
+    
+    -- Создаем представление для клиентов
+    IF NOT EXISTS (SELECT * FROM sys.views WHERE name = 'AvailableCarsView')
+    BEGIN
+        EXEC('CREATE VIEW AvailableCarsView AS 
+              SELECT CarID, Make, Model, Year, LicensePlate, DailyRate 
+              FROM Cars 
+              WHERE Status = ''Available''');
+        PRINT 'Представление AvailableCarsView создано';
+        
+        GRANT SELECT ON AvailableCarsView TO CustomerRole;
+        PRINT 'Права на представление предоставлены';
+    END
+END
+GO
+
+-- 4. Создание пользователей и назначение ролей
+
+-- Администратор (SQL Server аутентификация)
+USE master;
+GO
+
+IF NOT EXISTS (SELECT * FROM sys.server_principals WHERE name = 'CarRentalAdmin')
+BEGIN
+    CREATE LOGIN CarRentalAdmin 
+    WITH PASSWORD = 'Admin@12345',
+         CHECK_POLICY = ON,
+         CHECK_EXPIRATION = ON,
+         DEFAULT_DATABASE = CarRentalDB;
+    PRINT 'Логин CarRentalAdmin создан';
+    
+    USE CarRentalDB;
+    CREATE USER CarRentalAdmin FOR LOGIN CarRentalAdmin;
+    PRINT 'Пользователь CarRentalAdmin создан';
+    
+    ALTER ROLE AdminRole ADD MEMBER CarRentalAdmin;
+    PRINT 'Роль AdminRole назначена пользователю CarRentalAdmin';
+END
+GO
+
+-- Менеджер (SQL Server аутентификация)
+USE master;
+GO
+
+IF NOT EXISTS (SELECT * FROM sys.server_principals WHERE name = 'RentalManager')
+BEGIN
+    CREATE LOGIN RentalManager 
+    WITH PASSWORD = 'Manager@123',
+         CHECK_POLICY = ON,
+         CHECK_EXPIRATION = ON,
+         DEFAULT_DATABASE = CarRentalDB;
+    PRINT 'Логин RentalManager создан';
+    
+    USE CarRentalDB;
+    CREATE USER RentalManager FOR LOGIN RentalManager;
+    PRINT 'Пользователь RentalManager создан';
+    
+    ALTER ROLE ManagerRole ADD MEMBER RentalManager;
+    PRINT 'Роль ManagerRole назначена пользователю RentalManager';
+END
+GO
+
+-- Сотрудник (SQL Server аутентификация)
+USE master;
+GO
+
+IF NOT EXISTS (SELECT * FROM sys.server_principals WHERE name = 'RentalEmployee')
+BEGIN
+    CREATE LOGIN RentalEmployee 
+    WITH PASSWORD = 'Employee@123',
+         CHECK_POLICY = ON,
+         CHECK_EXPIRATION = ON,
+         DEFAULT_DATABASE = CarRentalDB;
+    PRINT 'Логин RentalEmployee создан';
+    
+    USE CarRentalDB;
+    CREATE USER RentalEmployee FOR LOGIN RentalEmployee;
+    PRINT 'Пользователь RentalEmployee создан';
+    
+    ALTER ROLE EmployeeRole ADD MEMBER RentalEmployee;
+    PRINT 'Роль EmployeeRole назначена пользователю RentalEmployee';
+END
+GO
+
+-- Клиент (SQL Server аутентификация)
+USE master;
+GO
+
+IF NOT EXISTS (SELECT * FROM sys.server_principals WHERE name = 'Customer1')
+BEGIN
+    CREATE LOGIN Customer1 
+    WITH PASSWORD = 'Customer@1',
+         CHECK_POLICY = ON,
+         CHECK_EXPIRATION = ON,
+         DEFAULT_DATABASE = CarRentalDB;
+    PRINT 'Логин Customer1 создан';
+    
+    USE CarRentalDB;
+    CREATE USER Customer1 FOR LOGIN Customer1;
+    PRINT 'Пользователь Customer1 создан';
+    
+    ALTER ROLE CustomerRole ADD MEMBER Customer1;
+    PRINT 'Роль CustomerRole назначена пользователю Customer1';
+END
+GO
+
+-- 5. Дополнительные настройки безопасности
+
+-- Создание политики безопасности для паролей
+USE master;
+GO
+
+-- Для администратора - обязательная смена пароля при первом входе
+ALTER LOGIN CarRentalAdmin WITH PASSWORD = 'Admin@12345' MUST_CHANGE,
+    CHECK_POLICY = ON,
+    CHECK_EXPIRATION = ON;
+PRINT 'Настройки пароля для CarRentalAdmin обновлены';
+
+-- Для менеджера - стандартные настройки
+ALTER LOGIN RentalManager WITH CHECK_POLICY = ON, CHECK_EXPIRATION = ON;
+PRINT 'Настройки пароля для RentalManager обновлены';
+
+-- Для сотрудника - стандартные настройки
+ALTER LOGIN RentalEmployee WITH CHECK_POLICY = ON, CHECK_EXPIRATION = ON;
+PRINT 'Настройки пароля для RentalEmployee обновлены';
+
+-- Для клиента - стандартные настройки
+ALTER LOGIN Customer1 WITH CHECK_POLICY = ON, CHECK_EXPIRATION = ON;
+PRINT 'Настройки пароля для Customer1 обновлены';
+GO
+
+-- 6. Управление пользователями (примеры команд)
+
+-- Изменение пароля пользователя
+USE master;
+GO
+
+PRINT 'Пример изменения пароля:';
+PRINT 'ALTER LOGIN RentalManager WITH PASSWORD = ''NewManager@123'', OLD_PASSWORD = ''Manager@123'';';
+GO
+
+-- Отключение пользователя
+PRINT 'Пример отключения пользователя:';
+PRINT 'ALTER LOGIN Customer1 DISABLE;';
+GO
+
+-- Включение пользователя
+PRINT 'Пример включения пользователя:';
+PRINT 'ALTER LOGIN Customer1 ENABLE;';
+GO
+
+-- Удаление пользователя
+PRINT 'Пример удаления пользователя:';
+PRINT 'USE CarRentalDB;';
+PRINT 'DROP USER Customer1;';
+PRINT 'USE master;';
+PRINT 'DROP LOGIN Customer1;';
+GO
+
+-- 7. Создание хранимой процедуры для управления пользователями
+USE CarRentalDB;
+GO
+
+IF EXISTS (SELECT * FROM sys.objects WHERE type = 'P' AND name = 'sp_ManageCarRentalUser')
+DROP PROCEDURE sp_ManageCarRentalUser;
+GO
+
+CREATE PROCEDURE sp_ManageCarRentalUser
+    @Action NVARCHAR(20),            -- 'CREATE', 'ALTER', 'DISABLE', 'ENABLE', 'DELETE'
+    @LoginName NVARCHAR(50),         -- Имя логина
+    @Password NVARCHAR(100) = NULL,  -- Пароль (только для CREATE/ALTER)
+    @RoleName NVARCHAR(50) = NULL,   -- Название роли (только для CREATE)
+    @MustChange BIT = 0              -- Требовать смену пароля (только для CREATE/ALTER)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    DECLARE @SQL NVARCHAR(MAX);
+    DECLARE @UserExists BIT;
+    DECLARE @LoginExists BIT;
+    
+    -- Проверяем существование логина
+    SELECT @LoginExists = CASE WHEN EXISTS (
+        SELECT 1 FROM master.sys.server_principals WHERE name = @LoginName
+    ) THEN 1 ELSE 0 END;
+    
+    -- Проверяем существование пользователя в БД
+    SELECT @UserExists = CASE WHEN EXISTS (
+        SELECT 1 FROM sys.database_principals WHERE name = @LoginName
+    ) THEN 1 ELSE 0 END;
+    
+    -- Обработка действий
+    IF @Action = 'CREATE'
+    BEGIN
+        IF @LoginExists = 1
+        BEGIN
+            RAISERROR('Логин уже существует', 16, 1);
+            RETURN;
+        END
+        
+        IF @RoleName IS NULL OR NOT EXISTS (
+            SELECT 1 FROM sys.database_principals WHERE name = @RoleName AND type = 'R'
+        )
+        BEGIN
+            RAISERROR('Указанная роль не существует', 16, 1);
+            RETURN;
+        END
+        
+        -- Создаем логин
+        SET @SQL = 'CREATE LOGIN ' + QUOTENAME(@LoginName) + 
+                   ' WITH PASSWORD = ' + QUOTENAME(@Password, '''') + 
+                   ', CHECK_POLICY = ON, DEFAULT_DATABASE = CarRentalDB';
+        
+        IF @MustChange = 1
+            SET @SQL = @SQL + ', MUST_CHANGE';
+        
+        EXEC sp_executesql @SQL;
+        
+        -- Создаем пользователя
+        SET @SQL = 'CREATE USER ' + QUOTENAME(@LoginName) + 
+                   ' FOR LOGIN ' + QUOTENAME(@LoginName);
+        EXEC sp_executesql @SQL;
+        
+        -- Назначаем роль
+        SET @SQL = 'ALTER ROLE ' + QUOTENAME(@RoleName) + 
+                   ' ADD MEMBER ' + QUOTENAME(@LoginName);
+        EXEC sp_executesql @SQL;
+        
+        PRINT 'Пользователь ' + @LoginName + ' создан и добавлен в роль ' + @RoleName;
+    END
+    ELSE IF @Action = 'ALTER'
+    BEGIN
+        IF @LoginExists = 0
+        BEGIN
+            RAISERROR('Логин не существует', 16, 1);
+            RETURN;
+        END
+        
+        -- Изменяем пароль
+        SET @SQL = 'ALTER LOGIN ' + QUOTENAME(@LoginName) + 
+                   ' WITH PASSWORD = ' + QUOTENAME(@Password, '''') + 
+                   ', CHECK_POLICY = ON';
+        
+        IF @MustChange = 1
+            SET @SQL = @SQL + ', MUST_CHANGE';
+        
+        EXEC sp_executesql @SQL;
+        PRINT 'Пароль для пользователя ' + @LoginName + ' изменен';
+    END
+    ELSE IF @Action = 'DISABLE'
+    BEGIN
+        IF @LoginExists = 0
+        BEGIN
+            RAISERROR('Логин не существует', 16, 1);
+            RETURN;
+        END
+        
+        SET @SQL = 'ALTER LOGIN ' + QUOTENAME(@LoginName) + ' DISABLE';
+        EXEC sp_executesql @SQL;
+        PRINT 'Пользователь ' + @LoginName + ' отключен';
+    END
+    ELSE IF @Action = 'ENABLE'
+    BEGIN
+        IF @LoginExists = 0
+        BEGIN
+            RAISERROR('Логин не существует', 16, 1);
+            RETURN;
+        END
+        
+        SET @SQL = 'ALTER LOGIN ' + QUOTENAME(@LoginName) + ' ENABLE';
+        EXEC sp_executesql @SQL;
+        PRINT 'Пользователь ' + @LoginName + ' включен';
+    END
+    ELSE IF @Action = 'DELETE'
+    BEGIN
+        IF @UserExists = 1
+        BEGIN
+            -- Удаляем из роли (если есть)
+            DECLARE @RoleCommand NVARCHAR(MAX);
+            SELECT @RoleCommand = 'ALTER ROLE ' + QUOTENAME(name) + 
+                                  ' DROP MEMBER ' + QUOTENAME(@LoginName)
+            FROM sys.database_principals 
+            WHERE type = 'R' AND is_member = 1
+            AND EXISTS (
+                SELECT 1 FROM sys.database_role_members rm
+                JOIN sys.database_principals r ON rm.role_principal_id = r.principal_id
+                JOIN sys.database_principals m ON rm.member_principal_id = m.principal_id
+                WHERE m.name = @LoginName AND r.name = name
+            );
+            
+            IF @RoleCommand IS NOT NULL
+                EXEC sp_executesql @RoleCommand;
+            
+            -- Удаляем пользователя
+            SET @SQL = 'DROP USER ' + QUOTENAME(@LoginName);
+            EXEC sp_executesql @SQL;
+        END
+        
+        IF @LoginExists = 1
+        BEGIN
+            -- Удаляем логин
+            SET @SQL = 'DROP LOGIN ' + QUOTENAME(@LoginName);
+            EXEC sp_executesql @SQL;
+        END
+        
+        PRINT 'Пользователь ' + @LoginName + ' удален';
+    END
+    ELSE
+    BEGIN
+        RAISERROR('Неизвестное действие', 16, 1);
+        RETURN;
+    END
+END;
+GO
+
+PRINT 'Хранимая процедура sp_ManageCarRentalUser создана';
+GO
+
+-- Примеры использования процедуры:
+PRINT 'Пример создания нового менеджера:';
+PRINT 'EXEC sp_ManageCarRentalUser ''CREATE'', ''NewManager'', ''ManagerPass123'', ''ManagerRole'', 0;';
+PRINT '';
+PRINT 'Пример изменения пароля:';
+PRINT 'EXEC sp_ManageCarRentalUser ''ALTER'', ''RentalManager'', ''NewManagerPass123'', NULL, 1;';
+PRINT '';
+PRINT 'Пример отключения пользователя:';
+PRINT 'EXEC sp_ManageCarRentalUser ''DISABLE'', ''Customer1'', NULL, NULL, NULL;';
+PRINT '';
+PRINT 'Пример удаления пользователя:';
+PRINT 'EXEC sp_ManageCarRentalUser ''DELETE'', ''Customer1'', NULL, NULL, NULL;';
+GO
+
+-- 8. Создание представления для аудита пользователей
+USE CarRentalDB;
+GO
+
+IF EXISTS (SELECT * FROM sys.views WHERE name = 'UserSecurityAuditView')
+DROP VIEW UserSecurityAuditView;
+GO
+
+CREATE VIEW UserSecurityAuditView AS
+SELECT 
+    sp.name AS LoginName,
+    sp.type_desc AS LoginType,
+    CASE WHEN sp.is_disabled = 1 THEN 'Disabled' ELSE 'Enabled' END AS Status,
+    dp.name AS DatabaseUserName,
+    r.name AS DatabaseRole,
+    sp.create_date AS CreationDate,
+    sp.modify_date AS LastModifiedDate,
+    CASE WHEN sp.is_policy_checked = 1 THEN 'Yes' ELSE 'No' END AS PasswordPolicyEnforced,
+    CASE WHEN sp.is_expiration_checked = 1 THEN 'Yes' ELSE 'No' END AS PasswordExpirationEnforced
+FROM master.sys.server_principals sp
+LEFT JOIN sys.database_principals dp ON sp.sid = dp.sid
+LEFT JOIN sys.database_role_members rm ON dp.principal_id = rm.member_principal_id
+LEFT JOIN sys.database_principals r ON rm.role_principal_id = r.principal_id
+WHERE sp.type IN ('S', 'U') -- SQL и Windows пользователи
+AND sp.name NOT LIKE '##%' -- Исключаем системные учетные записи
+AND sp.name NOT IN ('sa', 'public');
+GO
+
+GRANT SELECT ON UserSecurityAuditView TO AdminRole;
+PRINT 'Представление UserSecurityAuditView создано и права предоставлены';
+GO
+
+-- 9. Проверка настроек безопасности
+PRINT 'Текущие пользователи и их роли:';
+SELECT * FROM UserSecurityAuditView;
+GO
+
+PRINT 'Настройка безопасности завершена';
